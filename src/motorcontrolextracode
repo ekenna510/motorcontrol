@@ -1,0 +1,1002 @@
+
+
+void MotorControl::SetPWMMinMax(int minleft,int maxleft,int minright,int maxright,int bminleft,int bmaxleft,int bminright,int bmaxright)
+{
+MinLEFT = (short) minleft;
+MaxLEFT =(short) maxleft;
+MinRIGHT =(short) minright;
+MaxRIGHT =(short) maxright;
+
+
+BMinLEFT = (short)bminleft ;
+BMaxLEFT = (short)bmaxleft;
+BMinRIGHT = (short)bminright;
+BMaxRIGHT = (short)bmaxright;
+
+RCLCPP_INFO(this->get_logger(), "SetPWMMinMax %d %d %d %d  %d %d %d %d",MinLEFT,MaxLEFT,MinRIGHT,MaxRIGHT,BMinLEFT,BMaxLEFT,BMinRIGHT,BMaxRIGHT);
+
+}
+
+void MotorControl::SetUseSlave(bool UseSlave)
+{
+mUseSlave = UseSlave;
+}
+// need to figure these out for left and right wheel
+
+int MotorControl::angularVelocitytoPWM(int MotorMax, int MotorMin,double VelocityMax,double VelocityMin,double angularVelocity)
+{
+int motorCmd;
+double slope,yintercept;
+if (angularVelocity == 0)
+    {
+    return 0;
+    }
+slope = (MotorMax - MotorMin) / (VelocityMax - VelocityMin );
+yintercept = MotorMax - (slope * VelocityMax);
+
+
+
+motorCmd = (int) (slope * fabs(angularVelocity) + yintercept);
+if (motorCmd > MotorMax)
+{
+motorCmd = MotorMax;
+}
+if (motorCmd < MotorMin)
+{
+motorCmd = MotorMin;
+}
+//motorCmd = -motorCmd;
+
+/*
+lets just abs not matter what
+if (angularVelocity > 0) // positive angular velocity
+    {
+    motorCmd = (int)(slope * angularVelocity + yintercept);
+    if (motorCmd > MotorMax)
+        {
+        motorCmd = MotorMax;
+        }
+      if (motorCmd < MotorMin)
+        {
+        motorCmd = MotorMin;
+        }
+    }
+else // negative angular velocity
+    {
+    motorCmd = (int) (slope * fabs(angularVelocity) + yintercept);
+    if (motorCmd > MotorMax)
+        {
+        motorCmd = MotorMax;
+        }
+    if (motorCmd < MotorMin)
+        {
+        motorCmd = MotorMin;
+        }
+    motorCmd = -motorCmd;
+    }
+*/
+return motorCmd;
+
+}
+
+
+//----------------------------------------------------------------------------
+// this is to find min pwm for each wheel to move and max PWM at desired max speed
+void MotorControl::PWMCallBackpwmCallback(const geometry_msgs::Vector3::ConstPtr& msg)
+{
+
+
+  RCLCPP_INFO(this->get_logger(), "PWMCallBack: %lf %lf %lf",msg->x,msg->y,msg->z);
+  mPubVel = true;
+  mLeftPWM = msg->x;
+  mRightPWM = msg->y;
+    
+    if (mLeftPWM < 0 || mRightPWM < 0)
+		{
+		if (mLeftPWM < 0)
+			{
+            if (mRightPWM < 0)
+                {
+                mDirection = 'B';
+                }
+            else
+                {
+                mDirection ='L';
+                }
+            }
+        else
+            {
+            mDirection ='R';
+            }		
+		}
+	else
+		{
+		if (mLeftPWM == 0 && mRightPWM == 0)
+			{
+			mDirection = 'S';
+			}
+		else
+			{
+			mDirection = 'F';
+			}
+		}
+    mLeftPWM = abs(mLeftPWM);
+	mRightPWM = abs(mRightPWM);
+	
+    //only execute code if slave is ready
+    if (State == 6)
+	    {
+
+      int nbrBytes;
+      if (msg->z == 1)
+      {
+
+        RCLCPP_INFO(this->get_logger(), "Sending H B 1 Reset encoder counter and turn on sensor");
+        nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"H B 1\n");
+
+      }
+			
+		if (mDirection != mLastDirection)
+		    {
+		    nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"D %d %c\n",CommandID,mDirection);
+		    if (mUseSlave)
+				{
+		    	mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+				}
+			mLastDirection = mDirection;
+
+			RCLCPP_INFO(this->get_logger(), "PWMCallBack: Change direction Dir %c to %c",mLastDirection , mDirection);
+
+		    }
+
+
+      nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"M %d %d %d\n",CommandID,mLeftPWM,mRightPWM);
+      if (mUseSlave)
+      {
+        mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+      }
+      mLastLeftPWM= mLeftPWM;
+      mLastRightPWM = mRightPWM;
+		RCLCPP_INFO(this->get_logger(), "PWMCallBack: Set pwm L %d R %d",  mLeftPWM,mRightPWM);
+
+
+	    }
+	else
+		{
+		RCLCPP_INFO(this->get_logger(), "PWMCallBack: slave not started pwm L %d R %d Dir %c %c",  mLeftPWM,mRightPWM,mDirection,mLastDirection);
+		}	
+}
+
+//-----------------------------------------------
+
+//Process ROS command message, send to uController
+void MotorControl::TwistCallBack(const geometry_msgs::Twist::ConstPtr& msg)
+{
+    int nbrBytes;
+    //only execute code if slave is ready
+    if (State == 6)
+    {
+    double TargetLinearVelocity,targetAngularVelocity,leftVelocity, rightVelocity,leftAngular;
+    bool sendspeed = false,sentdirection=false;
+
+    TargetLinearVelocity= msg->linear.x;
+    targetAngularVelocity=msg->angular.z;
+    //RCLCPP_INFO(this->get_logger(), "TargetLinearVelocity %f  targetAngularVelocity %f", TargetLinearVelocity,targetAngularVelocity );
+
+    //http://moorerobots.com/blog/post/4 is missing R in divisor per this youtube
+    //https://www.youtube.com/watch?v=aE7RQNhwnPQ
+
+    /*
+    Vr = (2Vc + WL)/2R
+    Vl = (2Vc - WL)/2R
+    where Vl and Vr are target velocity or let and right wheel
+    Vc is linear velocity (c = center) 
+	W = angular velocity 
+	L = wheel base
+	R = wheel radius
+    */
+   
+    //calculate tangential velocity 
+    // 8/18/2018 I think this is already converted into rad per second
+    leftVelocity = ((2 * TargetLinearVelocity) - (targetAngularVelocity * BASE))/(2.0 * WHEELRADIUS);
+    rightVelocity = ((2 * TargetLinearVelocity) + (targetAngularVelocity * BASE))/(2.0 * WHEELRADIUS);
+
+    ros::Time tnow =ros::Time::now();
+    double diff = (tnow - mLastCommndSent).toSec();
+
+
+    mLastRequestedLeftSpeed = mRequestedLeftSpeed;
+    mLastRequestedRightSpeed = mRequestedRightSpeed;
+
+    // calculate angular for left and right wheel
+    //leftAngular = leftVelocity/WHEELRADIUS;
+    //rightAngular = rightVelocity/WHEELRADIUS;
+    //mRequestedLeftSpeed =  leftVelocity/WHEELRADIUS; already have radius added above 8/18/2018
+    //mRequestedRightSpeed = rightVelocity/WHEELRADIUS;
+
+    mRequestedLeftSpeed =  leftVelocity;
+    mRequestedRightSpeed = rightVelocity;
+
+
+    if (mRequestedLeftSpeed != mLastRequestedLeftSpeed)
+    {
+    mLastLeftPWM= mLeftPWM;
+    // calculate new pwm
+    //    mleftpwm = angularVelocitytoPWM(MaxLEFT, MinLEFT,leftVelocityMaxRads,leftVelocityMinRads,mRequestedLeftSpeed);
+    if (mRequestedLeftSpeed < 0)
+      {
+          mLeftPWM = angularVelocitytoPWM(BMaxLEFT, BMinLEFT,MaxSpeed,MinSpeed,mRequestedLeftSpeed);
+      }
+        else
+      {
+          mLeftPWM = angularVelocitytoPWM(MaxLEFT, MinLEFT,MaxSpeed,MinSpeed,mRequestedLeftSpeed);
+      }
+    sendspeed = true;
+    }
+    else
+    {
+        if (diff > 1)
+        {
+                sendspeed = true;
+        }
+    }
+
+    if (mRequestedRightSpeed != mLastRequestedRightSpeed)
+    {
+      // save old values
+      mLastRightPWM = mRightPWM;
+      //    mrightpwm = angularVelocitytoPWM(MaxRIGHT, MinRIGHT,rightVelocityMaxRads,rightVelocityMinRads,mRequestedRightSpeed);
+      if (mRequestedRightSpeed < 0)
+      {
+      mRightPWM = angularVelocitytoPWM(BMaxRIGHT, BMinRIGHT,MaxSpeed,MinSpeed,mRequestedRightSpeed);
+      }
+      else
+      {
+      mRightPWM = angularVelocitytoPWM(MaxRIGHT, MinRIGHT,MaxSpeed,MinSpeed,mRequestedRightSpeed);
+      }
+    }
+    else
+    {
+        if (diff > 1)
+        {
+                sendspeed = true;
+        }
+    }
+
+
+
+
+    if (mRequestedLeftSpeed  < 0 ||  mRequestedRightSpeed < 0)
+        {
+        if (mRequestedLeftSpeed <  0)
+            {
+            if (mRequestedRightSpeed < 0)
+                {
+                mDirection = 'B';
+                }
+            else
+                {
+                mDirection ='L';
+                }
+            }
+        else
+            {
+            mDirection ='R';
+            }
+        }
+    else
+        {
+        mDirection ='F';
+        }
+
+    if (mDirection != mLastDirection)
+        {
+        nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"D %d %c\n",CommandID,mDirection);
+        if (mUseSlave)
+        {
+        	mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+        }
+
+        }
+
+
+    if (sendspeed)
+    {
+        nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"M %d %d %d\n",CommandID,mLeftPWM,mRightPWM);
+        if (mUseSlave)
+			{
+        	mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+			}
+        mLastCommndSent = tnow;
+
+    }
+
+    RCLCPP_INFO(this->get_logger(), "TwistCallBack: lin %f ang %f lv %f rv %f rls %f rrs %f L %d R %d Dir %c %c", TargetLinearVelocity , targetAngularVelocity,leftVelocity, rightVelocity,
+           mRequestedLeftSpeed, mRequestedRightSpeed, mLeftPWM,mRightPWM,mDirection,mLastDirection);
+    mLastDirection = mDirection;
+    }
+} //ucCommandCallback
+
+
+void MotorControl::CalcOdom2()
+{  
+    // code from turtlebot3
+
+
+  double delta_s, theta, delta_theta;
+
+
+   int localleftclick,localrightclick,dt;
+   double  VelLeft, VelRight, Velth, deltaX, deltaY,deltath,linear, angular;
+
+//        long lastleftclick=0,lastrightclick=0, deltaLeft, deltaRight;
+
+   //get time period for tick difference
+   dt = msensor.getTimeStamp()-SlaveTimestamp ;
+   // first time through  SlaveTimestamp=0 default to 100 ms
+   if (dt > 200)
+   {
+       dt = 100;
+   }
+
+   SlaveTimestamp = msensor.getTimeStamp();
+
+   localleftclick = msensor.getLeftClick();
+   localrightclick = msensor.getRightClick();
+
+   // how many click did wee see.
+   deltaLeft =  (localleftclick -lastleftclick);
+   deltaRight = (localrightclick - lastrightclick);
+
+   // save current click count for next run
+   lastleftclick = localleftclick;
+   lastrightclick = localrightclick;
+
+   double dtSeconds = dt/1000.0;
+
+   VelLeft =  LEFTTICK2RAD * (double)deltaLeft; //VelLeft/dtSeconds;
+   VelRight = RIGHTTICK2RAD * (double)deltaRight;//VelRight/dtSeconds;
+
+   delta_s = WHEELRADIUS * (deltaLeft + deltaRight) / 2.0;
+   theta   = WHEELRADIUS * (deltaRight - deltaLeft) / BASE;  
+
+   delta_theta = theta - lasttheta;
+
+  bot_pose.x += delta_s * cos(bot_pose.theta + (delta_theta / 2.0));
+  bot_pose.y += delta_s * sin(bot_pose.theta + (delta_theta / 2.0));
+  bot_pose.theta += delta_theta;
+
+  linear = delta_s / dtSeconds;
+  angular = delta_theta / dtSeconds;
+
+  lasttheta = theta;
+
+
+
+
+    ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (localleftclick > 0 || localrightclick > 0) ,"locallc %d lastlc %d lrc %d lastrc %d linear %f angular %f Vel l %f r %f th %f | delta x %f y %f new X %f y %f pwm L %d R %d",localleftclick,lastleftclick,localrightclick,lastrightclick,linear, angular,VelLeft,VelRight, Velth, 		deltaX,deltaY, bot_pose.x, bot_pose.y,msensor.getLeftMotor(),msensor.getRightMotor());
+
+
+
+
+   /*
+   https://github.com/ros-controls/ros_controllers/blob/kinetic-devel/diff_drive_controller/src/diff_drive_controller.cpp
+
+   */
+
+
+   /**
+    * This is a message object. You stuff it with data, and then publish it.
+    */
+//x,y,th, VelLeft, VelRight, Velth, deltaLeft, deltaRight
+
+   msg.pose.pose.position.x= bot_pose.x;
+   msg.pose.pose.position.y= bot_pose.y;
+   msg.pose.pose.position.z= 0;
+
+
+   //set the position
+   geometry_msgs::Quaternion odom_quat = tf::createQuaternionMsgFromYaw(bot_pose.theta);
+
+   msg.pose.pose.orientation = odom_quat;
+
+   msg.twist.twist.linear.x = linear; //vx;//vx
+   msg.twist.twist.linear.y = 0;//vy
+   msg.twist.twist.angular.z = angular;
+
+   msg.header.frame_id = odom_frame;
+   msg.child_frame_id = base_frame;
+
+
+   //---------------------------------------------------------------------------------------
+   /*
+   http://answers.ros.org/question/11973/gathering-wheel-encoder-data-and-publishing-on-the-odom-topic/
+   */
+
+   //first, we'll publish the transform over tf
+   geometry_msgs::TransformStamped odom_trans;
+   odom_trans.header.stamp = ros::Time::now();
+   odom_trans.header.frame_id = odom_frame;
+   odom_trans.child_frame_id = base_frame;
+
+   odom_trans.transform.translation.x = bot_pose.x;
+   odom_trans.transform.translation.y = bot_pose.y;
+   odom_trans.transform.translation.z = 0.0;
+   odom_trans.transform.rotation = odom_quat;
+
+   //send the transform
+   ptr_broadcaster->sendTransform(odom_trans);
+
+   //next, we'll publish the odometry message over ROS
+   //  nav_msgs::Odometry odom;
+   msg.header.stamp = odom_trans.header.stamp;//CurrentEncoderTime;
+
+       //publish the message
+
+   //---------------------------------------------------------
+
+           ptr_pub->publish(msg);
+   //----------------------------------------------------------------------
+
+   // send sonar
+   sonarmsg.range = msensor.GetFrontRange();
+   ptr_pubR->publish(sonarmsg);
+
+   if (  mPubVel )
+   {
+      geometry_msgs::Vector3 vel;
+      vel.x = VelLeft;
+      vel.y = VelRight;
+      vel.z=0;
+      ptr_pubvel->publish(vel);
+   }
+
+
+}
+
+
+
+
+
+void MotorControl::CalcOdom()
+{
+   int localleftclick,localrightclick,dt;
+   double  VelLeft, VelRight, Velth, deltaX, deltaY,deltath,linear, angular;
+
+
+//        long lastleftclick=0,lastrightclick=0, deltaLeft, deltaRight;
+
+   //get time period for tick difference
+   dt = msensor.getTimeStamp()-SlaveTimestamp ;
+   // first time through  SlaveTimestamp=0 default to 100 ms
+   if (dt > 200)
+   {
+       dt = 100;
+   }
+   SlaveTimestamp = msensor.getTimeStamp();
+
+   localleftclick = msensor.getLeftClick();
+   localrightclick = msensor.getRightClick();
+   // ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (localleftclick > 0 || localrightclick > 0) ,"CalcOdom localleftclick %d lastleftclick %d localrightclick %d lastrightclick %d",localleftclick,lastleftclick,localrightclick,lastrightclick );
+
+   // how many click did wee see.
+   deltaLeft =  (localleftclick -lastleftclick);
+   deltaRight = (localrightclick - lastrightclick);
+   // save current click count for next run
+   lastleftclick = localleftclick;
+   lastrightclick = localrightclick;
+
+
+   // need to figureout how to get lape time correctly
+   //dt = (e.current_real -e.last_real).toSec();
+   // use clicks to calculate distance moved
+   VelLeft = (deltaLeft * LEFTMETERPERCLICK ); //0.008863831
+   VelRight = (deltaRight * RIGHTMETERPERCLICK ); //0.004696358
+
+   /*
+   https://www.youtube.com/watch?v=XbXhA4k7Ur8
+   distance = (2PiR* deltaLeft) /tickperrotation
+   */
+
+
+   linear = (VelLeft + VelRight)/2.0;
+   angular = (VelRight - VelLeft ) /BASE; // divide by wheel base 0.12005
+
+   // ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (localleftclick > 0 || localrightclick > 0) ,"CalcOdom linear %f angular %f ", linear, angular);
+
+
+   double dtSeconds = dt/1000.0;
+   VelLeft = VelLeft/dtSeconds;
+   VelRight = VelRight/dtSeconds;
+   Velth = angular/dtSeconds;
+
+   // ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (localleftclick > 0 || localrightclick > 0) ,"CalcOdom Vel l %f r %f th %f ",VelLeft,VelRight, Velth);
+
+
+
+   if (fabs(angular) < 1e-6)
+   {
+   const double direction = bot_pose.theta + angular * 0.5;
+
+   /// Runge-Kutta 2nd order integration:
+   deltaX =linear * cos(direction);
+   deltaY =linear * sin(direction);
+   bot_pose.x += deltaX;
+   bot_pose.y += deltaY;
+   bot_pose.theta += angular *dt;
+
+   }
+   else
+   {
+   /// Exact integration (should solve problems when angular is zero):
+   const double oldth = bot_pose.theta;
+   const double r = linear/angular;
+   bot_pose.theta += angular;
+     deltaX= r * (sin(bot_pose.theta) - sin(oldth));
+     deltaY = -r * (cos(bot_pose.theta) - cos(oldth));
+   bot_pose.x  +=  deltaX;
+   bot_pose.y  += deltaY;
+   }
+
+    ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (localleftclick > 0 || localrightclick > 0) ,"locallc %d lastlc %d lrc %d lastrc %d linear %f angular %f Vel l %f r %f th %f | delta x %f y %f new X %f y %f pwm L %d R %d",localleftclick,lastleftclick,localrightclick,lastrightclick,linear, angular,VelLeft,VelRight, Velth, 		deltaX,deltaY, bot_pose.x, bot_pose.y,msensor.getLeftMotor(),msensor.getRightMotor());
+
+
+
+
+   /*
+   https://github.com/ros-controls/ros_controllers/blob/kinetic-devel/diff_drive_controller/src/diff_drive_controller.cpp
+
+   */
+
+
+   /**
+    * This is a message object. You stuff it with data, and then publish it.
+    */
+//x,y,th, VelLeft, VelRight, Velth, deltaLeft, deltaRight
+   msg.pose.pose.position.x= bot_pose.x;
+   msg.pose.pose.position.y= bot_pose.y;
+   msg.pose.pose.position.z= 0;
+
+
+   //---------------------------------------------------------------------------------------
+   /*
+   http://answers.ros.org/question/11973/gathering-wheel-encoder-data-and-publishing-on-the-odom-topic/
+   */
+   geometry_msgs::Quaternion odom_quat = tf::createQuaternionMsgFromYaw(bot_pose.theta);
+
+   //first, we'll publish the transform over tf
+   geometry_msgs::TransformStamped odom_trans;
+   odom_trans.header.stamp = ros::Time::now();
+   odom_trans.header.frame_id = "odom";
+   odom_trans.child_frame_id = base_frame;
+
+   odom_trans.transform.translation.x = bot_pose.x;
+   odom_trans.transform.translation.y = bot_pose.y;
+   odom_trans.transform.translation.z = 0.0;
+   odom_trans.transform.rotation = odom_quat;
+
+   //send the transform
+   ptr_broadcaster->sendTransform(odom_trans);
+
+   //next, we'll publish the odometry message over ROS
+   //  nav_msgs::Odometry odom;
+   msg.header.stamp = odom_trans.header.stamp;//CurrentEncoderTime;
+   msg.header.frame_id = "odom";
+
+   //set the position
+   msg.pose.pose.position.x = bot_pose.x;
+   msg.pose.pose.position.y = bot_pose.y;
+   msg.pose.pose.position.z = 0.0;
+   msg.pose.pose.orientation = odom_quat;
+
+   //set the velocity
+   msg.child_frame_id = "base_link";
+   msg.twist.twist.linear.x = deltaX; //vx;//vx
+   msg.twist.twist.linear.y = deltaY;//vy
+   msg.twist.twist.angular.z = Velth;
+
+
+       //publish the message
+
+   //---------------------------------------------------------
+
+           ptr_pub->publish(msg);
+   //----------------------------------------------------------------------
+
+   // send sonar
+   sonarmsg.range = msensor.GetFrontRange();
+   ptr_pubR->publish(sonarmsg);
+
+   if (  mPubVel )
+   {
+      geometry_msgs::Vector3 vel;
+      vel.x = VelLeft;
+      vel.y = VelRight;
+      vel.z=0;
+      ptr_pubvel->publish(vel);
+   }
+
+}
+
+
+void MotorControl::SetPose( geometry_msgs::Pose2D new_pose)
+{
+    bot_pose.x = new_pose.x;
+    bot_pose.y = new_pose.y;
+    bot_pose.theta = new_pose.theta;
+
+}
+
+bool MotorControl::SetEcho(int echo)
+{
+    int nbrBytes;
+CommandID++;
+if (echo == 1)
+    {
+    nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"E %d 1\n",CommandID);
+    }
+else
+{
+    nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"E %d 0\n",CommandID);
+}
+mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+
+
+return true;
+}
+
+
+bool MotorControl::StartSensor()
+{
+    int nbrBytes;
+    RCLCPP_INFO(this->get_logger(), "Sending H B 1 Reset encoder counter and turn on sensor");
+    nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"H B 1\n");
+    mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+
+
+    return true;
+}
+
+void MotorControl::RequestConfig()
+{
+    int nbrBytes;
+    RCLCPP_INFO(this->get_logger(), "Sending P");
+    nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"P\n");
+    mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+}
+void MotorControl::SetSonar( int Index)
+{
+int nbrBytes;
+    RCLCPP_INFO(this->get_logger(), "Sending A S %d %d", Index,mconfig.SonarAddress(Index));
+    nbrBytes=snprintf(OutgoingBuffer, NUMOUTGOING,"A S %d %d\n", Index+1,mconfig.SonarAddress(Index));
+    mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+
+}
+void MotorControl::SetGain(){
+    int nbrBytes;
+    RCLCPP_INFO(this->get_logger(), "Sending G %d 80 10\n",CommandID);
+    nbrBytes=snprintf(OutgoingBuffer, NUMOUTGOING,"G %d 80 10\n", CommandID);
+    mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+}
+
+void MotorControl::readLoop()
+{
+    char *ptr;
+    int strLen,BeginCommand;
+
+    if (mComm.SerialRead())
+    {
+
+     if ( mComm.SerialLineAvailable())
+     {
+       ptr = mComm.SerialGetData();
+       strLen = strlen(ptr);
+       for (BeginCommand = 0;BeginCommand <=strLen && !(ptr[BeginCommand] == '$' || ptr[BeginCommand] == 'E' || ptr[BeginCommand] == '1' ) ; BeginCommand++)
+       {
+           ;
+       }
+       if (ptr[BeginCommand]=='$' && ptr[BeginCommand+1]=='0' )
+       {
+        if (ptr[BeginCommand+2] == '3')
+        {
+            // sensor
+            if (State == 6 && ptr[(BeginCommand+strLen)-2] =='Z')
+            {
+ //                sensorData msensor;
+
+                 // 0123456789112345678921234567893123456
+                 // $03  2ff5   572   a9710d11dR ad3 688Z
+                 //we have a sensor reading
+               //  RCLCPP_INFO(this->get_logger(), "sensor reading");
+                 msensor.getSensorData(&ptr[BeginCommand],mconfig);
+                 // call odom I think
+                 CalcOdom2();
+            }
+            else
+            {
+                RCLCPP_INFO(this->get_logger(), "ELSE sensor reading");
+            }
+
+
+
+        }
+        else if (ptr[BeginCommand+2] == '1')
+        {
+            // annoucement state 1
+            RCLCPP_INFO(this->get_logger(), "Robot Build %s",&ptr[BeginCommand+13]);
+            State=1;
+            MotorControl::SetEcho(0);
+        }
+        else if (ptr[BeginCommand+2] == '2')
+        {
+            // error
+            // error
+        int slavestate = SlaveParse::ParseHex(&ptr[BeginCommand], 9, 2);
+        int result = SlaveParse::ParseInt(&ptr[BeginCommand], 11, 3);
+        ROS_ERROR("Slave State %d Error %d",slavestate,result);
+
+        }
+        else if (ptr[BeginCommand+2] == '7')
+        {
+            // config
+
+            if (ptr[BeginCommand+24] == 'Z')
+            {
+                // we have the whole config pass it to the config object to parse
+              mconfig =  BotConfig(&ptr[BeginCommand]);
+              if (!mconfig.IsConfigValid() )
+              {
+                  // This can happen if slave code was updated the eeprom config gets cleared
+                  // so we need to reset config and reread config
+                  mconfig.ResetConfig();
+                  for (int Index =0; Index < mconfig.NumberSonars();Index++ )
+                  {
+                   MotorControl::SetSonar(  Index);
+                   State =3;
+                  }
+    
+              }
+              else
+              {
+                   RCLCPP_INFO(this->get_logger(), "motorControl BotConfig valid. %d sonars",mconfig.NumberSonars());
+              }
+              // set this for later use in message $03
+              sensorEnd = (mconfig.HasCompass()? 4 :0) + (mconfig.NumberSonars() * 4) + 28;
+              // now need to get range and gain every time.
+              CommandID++;
+              MotorControl::SetGain();
+              State = 4;
+              }
+        }
+        else if (ptr[BeginCommand+2] == '8')
+            {
+                // port value
+                int slavestate = SlaveParse::ParseHex(&ptr[BeginCommand], 3, 2);
+                RCLCPP_INFO(this->get_logger(), "Slave portvalue %d",slavestate);
+            }
+            else
+            {
+                     ROS_ERROR("unknown command %c",ptr[BeginCommand+2] );
+            }
+
+
+       }
+       else if( ptr[BeginCommand] == 'E' )
+       {
+        State=2;
+        MotorControl:RequestConfig();
+       }
+       else if( ptr[BeginCommand] == '1' )
+       {
+        State = 6;
+        MotorControl::StartSensor();
+       }
+       else
+       {
+           ROS_ERROR("unknown command %s",ptr );
+
+       }
+    }
+   }
+}
+
+void MotorControl::fakeReadLoop()
+{
+// need to hard code this so the TwistCallBack will process
+State=6;
+
+
+   ROS_INFO_THROTTLE(10, "fakereadloop");
+
+   int localleftclick;
+   int localrightclick;
+   unsigned short leftMotor;
+   unsigned short rightMotor; 
+   char direction;
+   double VelLeft;
+   double VelRight;
+
+
+   // get last reported values
+   localleftclick = msensor.getLeftClick();
+   localrightclick = msensor.getRightClick();
+   leftMotor = msensor.getLeftMotor();
+   rightMotor =msensor.getRightMotor();
+   direction = msensor.getDirection();
+
+
+    ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (mRequestedLeftSpeed > 0 || mRequestedRightSpeed > 0) ,"fakeReadLoop input click L %d %d PWM L %d %d Dir %c req speed L %f %f", localleftclick,localrightclick,leftMotor, rightMotor,direction,mRequestedLeftSpeed,mRequestedRightSpeed  );
+
+   //calculate what clicks should have been
+   //convert rad to meter per second (mps)
+   // wheel velocity(m/s) = wheel rotation(rad/s) * wheel radius(m)
+   // then divide by  meter per tick
+   // then divide by 10 to get ticks in this time period
+
+	VelLeft = mRequestedLeftSpeed  * WHEELRADIUS; // convert to mps
+	VelLeft = VelLeft / LEFTMETERPERCLICK;
+	VelLeft = VelLeft /10; 
+
+	VelRight = mRequestedRightSpeed  * WHEELRADIUS; // convert to mps
+	VelRight = VelRight / RIGHTMETERPERCLICK;
+	VelRight = VelRight /10;
+
+	// handle direction change
+	if (direction != mDirection)
+		{
+		if (mDirection == 'F')
+			{
+			if(direction == 'L')
+               {
+               VelLeft = 0;
+               if (rightMotor < mRightPWM)
+				{
+                VelRight = VelRight * (rightMotor/mRightPWM); 
+                }
+               }
+			if(direction == 'R')
+               {
+               VelRight = 0;
+               if (leftMotor < mLeftPWM)
+				{
+                VelLeft = VelLeft * (leftMotor/mLeftPWM); 
+                }
+               }
+			if(direction == 'B')
+               {
+               VelLeft = 0;
+               VelRight = 0; 
+               }
+			if(direction == 'S')
+               {
+               VelLeft = 0;
+               VelRight = 0; 
+               }
+			}
+		else
+			{
+		if (mDirection == 'L')
+			{
+			if(direction == 'F')
+               {
+               VelLeft = 0;
+  
+               if (rightMotor < mRightPWM)
+				{
+                VelRight = VelRight * (rightMotor/mRightPWM); 
+                }
+               }
+			if(direction == 'R')
+               {
+               VelRight = 0;
+               VelRight = 0; 
+               }
+			if(direction == 'B')
+               {
+               VelRight = 0;
+               if (leftMotor < mLeftPWM)
+				{
+                VelLeft = VelLeft * (leftMotor/mLeftPWM); 
+                }
+               }
+			if(direction == 'S')
+               {
+               VelLeft = 0;
+               VelRight = 0; 
+               }
+			}
+			else
+				{
+				if (mDirection == 'R')
+					{
+					if(direction == 'F')
+				       {
+				       VelRight = 0;
+				       if (leftMotor < mLeftPWM)
+						{
+				        VelLeft = VelLeft * (leftMotor/mLeftPWM); 
+				        }
+				       }
+					if(direction == 'R')
+				       {
+				       VelLeft = 0;
+				       VelRight = 0; 
+				       }
+					if(direction == 'B')
+				       {
+				       VelLeft = 0;
+		  
+				       if (rightMotor < mRightPWM)
+						{
+				        VelRight = VelRight * (rightMotor/mRightPWM); 
+				        }
+				       }
+					if(direction == 'S')
+				       {
+				       VelLeft = 0;
+				       VelRight = 0; 
+				       }
+					}
+				if (mDirection == 'B')
+					{
+					if(direction == 'F')
+				       {
+				       VelLeft = 0;
+				       VelRight = 0; 
+				       }
+					if(direction == 'R')
+				       {
+				       VelLeft = 0;
+		  
+				       if (rightMotor < mRightPWM)
+						{
+				        VelRight = VelRight * (rightMotor/mRightPWM); 
+				        }
+				       }
+					if(direction == 'L')
+				       {
+
+				       VelRight = 0;
+				       if (leftMotor < mLeftPWM)
+						{
+				        VelLeft = VelLeft * (leftMotor/mLeftPWM); 
+				        }
+
+				       }
+					if(direction == 'S')
+				       {
+				       VelLeft = 0;
+				       VelRight = 0; 
+				       }
+					}
+
+
+				}
+
+			}		
+		}
+localleftclick = localleftclick + (int) VelLeft;
+localrightclick = localrightclick + (int) VelRight;
+
+
+//RIGHTTICKPERROTATION
+//LEFTTICKPERROTATION
+
+
+
+    //mLastRequestedLeftSpeed = mRequestedLeftSpeed;
+    //mLastRequestedRightSpeed = mRequestedRightSpeed;
+    //mLastLeftPWM= mLeftPWM;
+    //mLastRightPWM = mRightPWM;
+    //mDirection != mLastDirection%c
+
+    ROS_INFO_EXPRESSION(this->get_logger(),LOG_INFO_DEBUG == 1 && (mRequestedLeftSpeed > 0 || mRequestedRightSpeed > 0) ,"fakeReadLoop output click L %d %d PWM L %d %d Dir %c ",localleftclick, localrightclick,mLastLeftPWM, mLastRightPWM, mLastDirection);
+msensor.setSensorTestData(localleftclick, localrightclick,mLeftPWM, mRightPWM, mLastDirection);
+
+
+   CalcOdom2();
+}
+void MotorControl::CloseSerial()
+{
+   mComm.SerialClose();
+}

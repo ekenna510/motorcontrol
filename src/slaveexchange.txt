@@ -1,0 +1,34 @@
+in readloop
+slave sends 
+$01EFK000nnn Build date         where 000nnn = slave timecode and Date is compile date of the slave code
+slave state=waitstart
+motorcontrol sends 
+E nn 0          E= echo nn=commandid 0 = off
+sets motorcontrol state=1 
+
+slave send E 1 (on old code)
+Motorcontrol 
+sets state to 2
+send P
+
+slave sends $07C %2x S %2x %2x %2x %2x %2x B %2xZ C=compass S 0 sonar address in hex B = baud ubbrl (current slave baud rate)
+$07C 00 S 72 79 00 00 00 B 19Z
+Motorcontrol 
+Create botconfig 
+    fail
+        set state to 3 if botconfig fails and reset config and sets sonar address
+        sends  A S index sonaraddress
+    then
+    set state = 4 set gain
+    sends G %d 80 10 %d = commandid reduces strength of ping
+
+slave 
+    motorstate =5 
+    sets range and gain
+    sends $09Z
+    then set to 1 ping and after 100ms set to 2 send output.
+motorcontrol
+    State = 6
+    send H B 3 to start collecting sensors
+
+
