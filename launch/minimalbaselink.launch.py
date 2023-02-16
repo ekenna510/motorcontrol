@@ -61,5 +61,6 @@ def generate_launch_description():
             arguments=[],
             #prefix=['gdb -ex "break main" -ex run  --args'],            
             output='screen'),
+        #need to add node for ydlidar
     ])
 
