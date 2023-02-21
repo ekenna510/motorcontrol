@@ -55,7 +55,7 @@ endif()
 ################################################################################
 # Install
 ################################################################################
-install(DIRECTORY config launch
+install(DIRECTORY config launch map rviz 
   DESTINATION share/${PROJECT_NAME}
 )
 
