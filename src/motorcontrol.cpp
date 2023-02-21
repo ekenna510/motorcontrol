@@ -13,6 +13,7 @@
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2_ros/static_transform_broadcaster.h>
 #include "tf2_ros/buffer.h"
+#include "std_msgs/msg/int8.hpp"
 
 //#include "transform_broadcaster.h"
 
@@ -204,6 +205,8 @@ rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr ptr_pub;
 rclcpp::Publisher<sensor_msgs::msg::Range>::SharedPtr  ptr_pubR;
 rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr sub;
 rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr sub2;
+rclcpp::Subscription<std_msgs::msg::Int8>::SharedPtr substate;
+
 
 rclcpp::Publisher<geometry_msgs::msg::Vector3>::SharedPtr ptr_pubvel;
 std::unique_ptr<tf2_ros::TransformBroadcaster> ptr_broadcaster;
@@ -322,7 +325,8 @@ MotorControl() : Node("motorcontrol")
   //rosNode.param<bool>("/motorControl/pwm/listenpwmmsg",ListenPWMMsg,ListenPWMMsg);
   this->declare_parameter<bool>("listenpwmmsg",ListenPWMMsg);
   this->get_parameter("listenpwmmsg",ListenPWMMsg);  
-
+  // subscribe to state topic
+  substate  = this->create_subscription<std_msgs::msg::Int8>("getstate", 10, std::bind(&MotorControl::GetStateCallBack, this,std::placeholders::_1));
 
   if (ListenPWMMsg)
     {
@@ -538,15 +542,17 @@ void PWMCallBackpwmCallback(const geometry_msgs::msg::Vector3::SharedPtr msg)
 void TwistCallBack(const geometry_msgs::msg::Twist::SharedPtr msg )
 {
     int nbrBytes;
-    //only execute code if slave is ready
-    if (State == 6)
-    {
     double TargetLinearVelocity,targetAngularVelocity,leftVelocity, rightVelocity;//,leftAngular;
-    bool sendspeed = false;//,sentdirection=false;
 
     TargetLinearVelocity= msg->linear.x;
     targetAngularVelocity=msg->angular.z;
-    //RCLCPP_INFO(this->get_logger(), "TargetLinearVelocity %f  targetAngularVelocity %f", TargetLinearVelocity,targetAngularVelocity );
+    RCLCPP_INFO(this->get_logger(), "TargetLinearVelocity %f  targetAngularVelocity %f", TargetLinearVelocity,targetAngularVelocity );
+
+    //only execute code if slave is ready
+    if (State == 6)
+    {
+    bool sendspeed = false;//,sentdirection=false;
+
 
     //http://moorerobots.com/blog/post/4 is missing R in divisor per this youtube
     //https://www.youtube.com/watch?v=aE7RQNhwnPQ
@@ -684,6 +690,49 @@ void TwistCallBack(const geometry_msgs::msg::Twist::SharedPtr msg )
     }
 } //ucCommandCallback
 
+
+void GetStateCallBack(const std_msgs::msg::Int8::SharedPtr msg )
+{
+    int8_t statecommand = msg->data;
+    RCLCPP_INFO(this->get_logger(), "GetStateCallBack %d current MotorControl state = %d",statecommand,State);
+    int nbrBytes;
+    if (statecommand == 0)
+    {
+    nbrBytes=snprintf(OutgoingBuffer,NUMOUTGOING,"S\n");
+    if (UseSlave)
+	    {
+        mComm.SerialWrite(OutgoingBuffer,nbrBytes);
+		}
+    }
+    else
+    {
+        if (statecommand == 1)
+            {
+                MotorControl::SetEcho(0);
+            }
+        else if  (statecommand == 2)
+        {
+        MotorControl::RequestConfig(); 
+        }
+        else if  (statecommand == 3)
+        {
+        MotorControl::SetGain();
+        }
+        else if  (statecommand == 4)
+        {
+        MotorControl::StartSensor();
+        }        
+        else if  (statecommand ==6)
+        {
+        MotorControl::StartSensor();
+        }        
+        State = statecommand;
+
+
+        /* code */
+    }
+    
+}
 
 void CalcOdom2()
 {  
@@ -1152,10 +1201,18 @@ void readLoop()
         RCLCPP_ERROR(this->get_logger(), "Slave State %d Error %d",slavestate,result);
 
         }
+        else if (ptr[BeginCommand+2] == '6')
+        {
+            //current state of slave
+            int slavestate = SlaveParse::ParseHex(&ptr[BeginCommand], 6, 2);
+
+            RCLCPP_INFO(this->get_logger(), "Robot state %d slave state  %d",State,slavestate);
+
+        }
         else if (ptr[BeginCommand+2] == '7')
         {
             // config
-
+            RCLCPP_INFO(this->get_logger(), "Slave config received");
             if (ptr[BeginCommand+24] == 'Z' || ptr[BeginCommand+29] == 'Z')
             {
                 // we have the whole config pass it to the config object to parse
@@ -1170,6 +1227,8 @@ void readLoop()
                   {
                    MotorControl::SetSonar(  Index);
                    State =3;
+                   RCLCPP_INFO(this->get_logger(), "MotorControl state 3");
+
                   }
     
               }
@@ -1183,6 +1242,7 @@ void readLoop()
               CommandID++;
               MotorControl::SetGain();
               State = 4;
+              RCLCPP_INFO(this->get_logger(), "MotorControl state 4");              
               }
         }
         else if (ptr[BeginCommand+2] == '8')
@@ -1196,15 +1256,19 @@ void readLoop()
             if (State == 1)
                 {
                 State=2;
+                RCLCPP_INFO(this->get_logger(), "MotorControl state 2");                   
+                MotorControl::RequestConfig();                
                 }
             else if (State == 4)
                 {
                 State = 6;
+                RCLCPP_INFO(this->get_logger(), "MotorControl state 6");   
                 MotorControl::StartSensor();              
                 }
             else
                 {
                 State = 6;
+                RCLCPP_INFO(this->get_logger(), "MotorControl state 6 else");                 
                 MotorControl::StartSensor();
                 }
             
@@ -1219,11 +1283,13 @@ void readLoop()
        else if( ptr[BeginCommand] == 'E' )
        {
         State=2;
+        RCLCPP_INFO(this->get_logger(), "MotorControl state 2");           
         MotorControl::RequestConfig();
        }
        else if( ptr[BeginCommand] == '1' )
        {
         State = 6;
+        RCLCPP_INFO(this->get_logger(), "MotorControl state 6 from command 1");           
         MotorControl::StartSensor();
        }
        else

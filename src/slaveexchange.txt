@@ -9,7 +9,7 @@ sets motorcontrol state=1
 slave send E 1 (on old code)
 Motorcontrol 
 sets state to 2
-send P
+send P  motorcontrol::RequestConfig
 
 slave sends $07C %2x S %2x %2x %2x %2x %2x B %2xZ C=compass S 0 sonar address in hex B = baud ubbrl (current slave baud rate)
 $07C 00 S 72 79 00 00 00 B 19Z
@@ -23,7 +23,7 @@ Create botconfig
     sends G %d 80 10 %d = commandid reduces strength of ping
 
 slave 
-    motorstate =5 
+    motorstate =3 
     sets range and gain
     sends $09Z
     then set to 1 ping and after 100ms set to 2 send output.
